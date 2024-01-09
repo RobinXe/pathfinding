@@ -1,3 +1,4 @@
+import math
 import os
 import io
 import av
@@ -111,11 +112,11 @@ def dijkstra(map_array, start, targets):
             current = prev[current]
         path.insert(0, start)
 
-        results.append((start, target, e_values[target], g_values[target], path))
+        results.append((start, target, e_values[target], g_values[target], np.array(path, dtype=np.uint16)))
 
     print(f'All targets found in {time.time() - timer} s.')
 
-    return results, explored_history
+    return results, np.array(explored_history, dtype=np.uint16)
 
 
 def a_star(start, end, map_array):
@@ -159,7 +160,7 @@ def a_star(start, end, map_array):
         current = prev[current]
     path.insert(0, start)
 
-    return g_values[end], [path, ], explored_history
+    return g_values[end], [np.array(path, dtype=np.uint16), ], np.array(explored_history, dtype=np.uint16)
 
 
 def route_image(map_image, route):
@@ -173,9 +174,11 @@ def route_image(map_image, route):
 def show_routes(image, routes):
     for rte in routes:
         for idx, _ in enumerate(rte):
-            if rte[idx] != rte[-1]:
+            if (rte[idx] != rte[-1])[0]:
+                pt1 = tuple([int(i) for i in reversed(rte[idx])])
+                pt2 = tuple([int(i) for i in reversed(rte[idx + 1])])
                 try:
-                    cv2.line(image, tuple(reversed(rte[idx])), tuple(reversed(rte[idx + 1])), (130, 0, 130), 3)
+                    cv2.line(image, pt1, pt2, (130, 0, 130), 3)
                 except IndexError:
                     pass
     # image = image[:2160, :3840]
@@ -189,6 +192,62 @@ def resize_frame(frame, ratio=0.436363637):
 
 def frame_from_array(frame):
     return av.VideoFrame.from_ndarray(frame, format="bgr24")
+
+
+@numba.njit(parallel=True, fastmath=True)
+def render_frame_opt(map_img, history, frame_no, slice_size):
+    for i in numba.prange(slice_size):
+        idx = i + (slice_size * frame_no)
+        if idx <= len(history):
+            coords = (history[i + (slice_size * frame_no)][0], history[i + (slice_size * frame_no)][1])
+            # print(coords)
+            map_img[coords] = (((map_img[coords] * 0.8) + np.array((51, 0, 51), dtype=np.uint8)).astype(np.uint8))
+    return map_img
+
+
+def render_video_opt(map_img, history, routes, vid_length, vid_fps, output_path):
+    vid_no_frames = vid_length * vid_fps
+    slice_size = int(math.ceil(len(history) / vid_no_frames))
+    map_img = (map_img.copy()).astype(np.uint8)
+
+    memory_file = io.BytesIO()
+    output = av.open(memory_file, 'w', format='mp4')
+    stream = output.add_stream('h264', str(vid_fps))
+    stream.width = 1920
+    stream.height = 1080
+    stream.options = {'crf': '20'}
+
+    for _ in range(vid_fps * 2):
+        video_frame = av.VideoFrame.from_ndarray(map_img[::2, ::2], format="bgr24")
+        packet = stream.encode(video_frame)
+        output.mux(packet)
+
+    timer_render = time.time()
+    print('Rendering frames...')
+    time.sleep(0.01)
+    for i in tqdm(range(vid_no_frames)):
+        map_img = render_frame_opt(map_img, history, i, slice_size)
+        video_frame = av.VideoFrame.from_ndarray(map_img[::2, ::2], format="bgr24")
+        packet = stream.encode(video_frame)
+        output.mux(packet)
+    print(f'{vid_no_frames} rendered in {time.time() - timer_render:2f} seconds.')
+
+    map_img = show_routes(map_img, routes)
+
+    for _ in range(vid_fps * 5):
+        video_frame = av.VideoFrame.from_ndarray(map_img, format="bgr24")
+        packet = stream.encode(video_frame)
+        output.mux(packet)
+
+    timer_save_video = time.time()
+    print('Saving video...')
+    packet = stream.encode(None)
+    output.mux(packet)
+    output.close()
+
+    with open(output_path, 'wb') as f:
+        f.write(memory_file.getbuffer())
+    print(f'Video saved in {time.time() - timer_save_video:2f} seconds.')
 
 
 @numba.njit(cache=False, parallel=True)
@@ -579,29 +638,32 @@ if __name__ == '__main__':
         pathfinder = PathFinder("map_energy_quantised.bmp", "map_all.png",
                                 START, END, [TGT_A, TGT_B, TGT_C])
 
-    timer = time.time()
-    X = Array('i', pathfinder.map_image.shape[0] * pathfinder.map_image.shape[1] * pathfinder.map_image.shape[2])
-
-    X_np = np.frombuffer(X.get_obj(), dtype=np.int32).reshape(pathfinder.map_image.shape).astype(np.uint8)
-
-    np.copyto(X_np, pathfinder.map_image)
-    timer = time.time() - timer
-    print(f'Completed the memory operations in {timer:.2f} seconds.')
-
-    cv2.imshow('MAP', X_np[::2, ::2])
-    cv2.waitKey(0)
+    # timer = time.time()
+    # X = Array('i', pathfinder.map_image.shape[0] * pathfinder.map_image.shape[1] * pathfinder.map_image.shape[2])
+    #
+    # X_np = np.frombuffer(X.get_obj(), dtype=np.int32).reshape(pathfinder.map_image.shape).astype(np.uint8)
+    #
+    # np.copyto(X_np, pathfinder.map_image)
+    # timer = time.time() - timer
+    # print(f'Completed the memory operations in {timer:.2f} seconds.')
+    #
+    # cv2.imshow('MAP', X_np[::2, ::2])
+    # cv2.waitKey(0)
 
     # print(pathfinder.pixel_nm)
 
-    # t_list = [i for i in pathfinder.graph[START].keys()]
-    #
-    # res, exp = dijkstra(pathfinder.map_array, START, t_list)
+    t_list = [i for i in pathfinder.graph[START].keys()]
+
+    res, exp = dijkstra(pathfinder.map_array, START, t_list)
 
     # res, exp = dijkstra(pathfinder.map_array, START, [(750, 750)])
+
+    render_video_opt(pathfinder.map_image, exp, [r[-1] for r in res], 180, 60, 'output2.mp4')
+
     # render_video_conc(pathfinder.map_image, [r[-1] for r in res], exp, 60)
 
     # render_frame.recompile()
-    # render_video_conc([r[-1] for r in res], exp, 180, 'output1.mp4')
+    # render_video_conc([r[-1] for r in res], exp, 10, 'output1.mp4')
 
     # print(START, [k for k in pathfinder.graph[START].keys()][0])
     # print(pathfinder.graph[START][[k for k in pathfinder.graph[START].keys()][0]]['d_path'])
