@@ -13,6 +13,7 @@ import time
 from tqdm import tqdm
 import json
 from multiprocessing import Array, RawArray
+from matplotlib import pyplot as plt
 
 # Constants
 START = (551, 486)
@@ -50,7 +51,7 @@ def diagonal_distance(p1, p2):
     return (dx + dy) + (SQRT2 - 2) * min(dx, dy)
 
 
-def dijkstra(map_array, start, targets):
+def dijkstra(map_array, start, targets, radius=3):
     shape = map_array.shape
     g_values = np.full(shape, np.inf, dtype=np.float32)
     e_values = np.full(shape, np.inf, dtype=np.float32)
@@ -72,7 +73,7 @@ def dijkstra(map_array, start, targets):
         current = open_set.pop_item()
         closed_set.add(current)
         explored_history.append(current)
-        current_neighbours = neighbour_coords_generalised(current, map_array, 3)
+        current_neighbours = neighbour_coords_generalised(current, map_array, radius)
 
         for neighbour in current_neighbours:
             if neighbour[0] not in closed_set:
@@ -104,7 +105,7 @@ def dijkstra(map_array, start, targets):
     return results, np.array(explored_history, dtype=np.uint16)
 
 
-def a_star(start, end, map_array):
+def a_star(start, end, map_array, radius):
     heuristic = euclidian_distance
     shape = map_array.shape
     g_values = np.full(shape, np.inf, dtype=np.float32)  # Array to store values for g(n)
@@ -120,7 +121,7 @@ def a_star(start, end, map_array):
         current = open_set.pop_item()
         closed_set.add(current)
         explored_history.append(current)
-        current_neighbours = neighbour_coords_generalised(current, map_array, 5)
+        current_neighbours = neighbour_coords_generalised(current, map_array, radius)
 
         if current == end:
             break
@@ -331,7 +332,9 @@ class PathFinder:
         print('Finding energies...')
         time.sleep(0.01)
         with concurrent.futures.ProcessPoolExecutor() as executor:
-            for results, history in list(tqdm(executor.map(dijkstra, itertools.repeat(self.map_array), starts, targets),
+            mp = itertools.repeat(self.map_array)
+            rx = itertools.repeat(5)
+            for results, history in list(tqdm(executor.map(dijkstra, mp, starts, targets, rx),
                                               total=len(starts))):
                 history_loc = results[0][0]
                 self.histories[history_loc] = history
@@ -362,7 +365,9 @@ class PathFinder:
         print('Finding distances...')
         time.sleep(0.01)
         with concurrent.futures.ProcessPoolExecutor() as executor:
-            for result in list(tqdm(executor.map(a_star, starts, ends, itertools.repeat(self.map_array)),
+            mp = itertools.repeat(self.map_array)
+            rx = itertools.repeat(5)
+            for result in list(tqdm(executor.map(a_star, starts, ends, mp, rx),
                                total=len(starts))):
                 start = tuple(result[1][0][0])
                 end = tuple(result[1][0][-1])
@@ -423,6 +428,7 @@ class PathFinder:
         route = []
         for idx in range(len(path) - 1):
             route.append(self.graph[path[idx]][path[idx + 1]][parameter])
+            # print(self.graph[path[idx]][path[idx + 1]]['avg_energy'] * self.energy_divisor)
 
         for bound in route:
             for idx in range(len(bound) - 1):
@@ -431,22 +437,36 @@ class PathFinder:
         output_map = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         Image.fromarray(output_map).show()
 
+    def video_route(self):
+        pass
+
 
 if __name__ == '__main__':
 
     try:
-        with open('pathfinder.pkl', 'rb') as file:
+        with open(f'{START}_{END}.pkl', 'rb') as file:
             pathfinder = pickle.load(file)
     except FileNotFoundError:
-        pathfinder = PathFinder("map_energy_quantised.bmp", "map_all.png",
+        pathfinder = PathFinder("map_energy_quantised_fixed.bmp", "map_all.png",
                                 START, END, [TGT_A, TGT_B, TGT_C])
 
         pathfinder.pop_and_pik()
 
-    # print(pathfinder.find_energies())
+    # temp_image = np.array(Image.open('map_energy_quantised_fixed.bmp')).astype(np.uint8)
+    # print(temp_image.shape)
+    # for tgt in [TGT_A, TGT_B, TGT_C]:
+    #     tgt = tuple(reversed(tgt))
+    #     cv2.circle(temp_image, tgt, 82, 0, -1)
+    #
+    # cv2.imwrite('map_energy_quantised_fixed.bmp', temp_image)
 
-    # print(len(pathfinder.graph[START].keys()))
-    # print(len(pathfinder.graph[END].keys()))
+    # plt.imshow(temp_image, cmap='gray', vmin=0, vmax=255, interpolation='none', origin='upper')
+    # plt.show()
+
+    score, route = pathfinder.find_mst('energy')
+
+    print(score)
+    pathfinder.display_route(route, 'e_path')
 
     # for i in pathfinder.graph.keys():
     #     print(len(pathfinder.graph[i].keys()))
