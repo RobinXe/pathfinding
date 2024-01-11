@@ -13,7 +13,7 @@ import time
 from tqdm import tqdm
 import json
 from multiprocessing import Array, RawArray
-from matplotlib import pyplot as plt
+import timeit
 
 # Constants
 START = (551, 486)
@@ -40,7 +40,7 @@ def neighbour_coords_generalised(coords, map_array, radius):
 
 @numba.njit(fastmath=True)
 def euclidian_distance(p1, p2):
-    return np.sqrt((p1[0] - p2[0]) ** 2 + (p1[1] - p2[1]) ** 2)
+    return np.sqrt(np.add(np.square(np.subtract(p1[0], p2[0])), np.square(np.subtract(p1[1], p2[1]))))
 
 
 @numba.njit(fastmath=True)
@@ -432,7 +432,7 @@ class PathFinder:
 
         for bound in route:
             for idx in range(len(bound) - 1):
-                cv2.line(frame, tuple(reversed(bound[idx])), tuple(reversed(bound[idx + 1])), (130, 0, 130), 3)
+                cv2.line(frame, tuple(reversed(bound[idx])), tuple(reversed(bound[idx + 1])), (130, 0, 130), 2)
 
         output_map = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         Image.fromarray(output_map).show()
@@ -452,6 +452,14 @@ if __name__ == '__main__':
 
         pathfinder.pop_and_pik()
 
+    # st = np.array(START, dtype=np.uint16)
+    # en = np.array(END, dtype=np.uint16)
+
+    # print(timeit.timeit(lambda: py_euclidian_distance(st, en), number=50000000))
+    # print(timeit.timeit(lambda: euclidian_distance(st, en), number=50000000))
+    # print(timeit.timeit(lambda: euclidian_distance(START, END), number=50000000))
+    # print(timeit.timeit(lambda: lin_euclidian_distance(st, en), number=50000000))
+
     # temp_image = np.array(Image.open('map_energy_quantised_fixed.bmp')).astype(np.uint8)
     # print(temp_image.shape)
     # for tgt in [TGT_A, TGT_B, TGT_C]:
@@ -463,10 +471,10 @@ if __name__ == '__main__':
     # plt.imshow(temp_image, cmap='gray', vmin=0, vmax=255, interpolation='none', origin='upper')
     # plt.show()
 
-    score, route = pathfinder.find_mst('energy')
-
-    print(score)
-    pathfinder.display_route(route, 'e_path')
+    # score, route = pathfinder.find_mst('energy')
+    #
+    # print(score)
+    # pathfinder.display_route(route, 'e_path')
 
     # for i in pathfinder.graph.keys():
     #     print(len(pathfinder.graph[i].keys()))
