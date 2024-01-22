@@ -22,7 +22,7 @@ SQRT2 = np.sqrt(2)  # Used a lot; precompute to reduce load
 
 
 @numba.njit(fastmath=True)
-def neighbour_coords_generalised(coords, map_array, radius):
+def find_neighbours(coords, map_array, radius):
     nbs = []
     for i in range(-radius, radius + 1):
         for j in range(-radius, radius + 1):
@@ -70,7 +70,7 @@ def dijkstra(map_array, start, targets, radius=3):
         current = open_set.pop_item()
         closed_set.add(current)
         explored_history.append(current)
-        current_neighbours = neighbour_coords_generalised(current, map_array, radius)
+        current_neighbours = find_neighbours(current, map_array, radius)
 
         for neighbour in current_neighbours:
             if neighbour[0] not in closed_set:
@@ -97,8 +97,6 @@ def dijkstra(map_array, start, targets, radius=3):
 
         results.append((start, target, e_values[target], g_values[target], np.array(path, dtype=np.uint16)))
 
-    # print(f'All targets found in {time.time() - timer} s.')
-
     return results, np.array(explored_history, dtype=np.uint16)
 
 
@@ -117,7 +115,7 @@ def a_star(start, end, map_array, radius):
         current = open_set.pop_item()
         closed_set.add(current)
         explored_history.append(current)
-        current_neighbours = neighbour_coords_generalised(current, map_array, radius)
+        current_neighbours = find_neighbours(current, map_array, radius)
 
         if current == end:
             break
@@ -132,7 +130,6 @@ def a_star(start, end, map_array, radius):
                     g_values[neighbour[0]] = provisional_neighbour_g
                     prev[neighbour[0]] = current
                     open_set.add_item(neighbour[0], provisional_neighbour_g + neighbour_h)
-                    # de_values[neighbour[0]] = de_values[current] + (neighbour[1] * map_array[neighbour[0]])
 
     path = []
     current = end
@@ -272,6 +269,7 @@ class PathFinder:
         self.all_nodes = set([self.start, self.end] + [x for xs in self.targets for x in xs])
         self.graph = self.generate_graph()
         self.pixel_nm = 2672.246 / euclidian_distance(self.start, self.end)
+        self.pixel_km = 4949 / euclidian_distance(self.start, self.end)
         self.energy_divisor = 150 / (4949 / euclidian_distance(self.start, self.end))
         self.histories = {i: None for i in self.graph.keys()}
 
@@ -563,12 +561,4 @@ if __name__ == '__main__':
         pathfinder.pop_and_pik()
 
     # pathfinder.video_route('energy')
-
-# TODO Writeup
-
-# https://santhalakshminarayana.github.io/blog/super-fast-python-multi-processing
-# https://santhalakshminarayana.github.io/blog/super-fast-python-numba
-# https://research.wmz.ninja/articles/2018/03/on-sharing-large-arrays-when-using-pythons-multiprocessing.html
-# https://stackoverflow.com/questions/66937630/python-multiprocessing-with-shared-rawarray
-# https://stackoverflow.com/questions/66378848/passing-shared-memory-variables-in-python-multiprocessing/66380200#66380200
-# https://numpy.org/doc/stable/reference/generated/numpy.copy.html
+    print(85 * pathfinder.pixel_km)
