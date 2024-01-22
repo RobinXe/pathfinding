@@ -63,8 +63,6 @@ def dijkstra(map_array, start, targets, radius=3):
     remaining_targets = [i for i in targets if i not in closed_set]
 
     while remaining_targets:
-        # if len(closed_set) % 100000 == 0:
-        #     print(f'Explored {len(closed_set)} nodes')
 
         current = open_set.pop_item()
         closed_set.add(current)
