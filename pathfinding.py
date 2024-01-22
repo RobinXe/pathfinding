@@ -1,8 +1,7 @@
-import os
+import math
 import io
 import av
 import pickle
-import ffmpeg
 import numba
 import cv2
 from PIL import Image
@@ -13,31 +12,17 @@ import concurrent.futures
 import time
 from tqdm import tqdm
 
+# Constants
 START = (551, 486)
 END = (1435, 2469)
 TGT_A = (791, 1441)
 TGT_B = (982, 1551)
 TGT_C = (1410, 2181)
-MAP_IMAGE = cv2.imread("map_all.png")
-
-sqrt2 = np.sqrt(2)
+SQRT2 = np.sqrt(2)  # Used a lot; precompute to reduce load
 
 
 @numba.njit(fastmath=True)
-def neighbour_coords(coords, map_array):
-    nbs = []
-    for i in range(-1, 2):
-        for j in range(-1, 2):
-            if not (i == 0 and j == 0):
-                nbr = (coords[0] + i, coords[1] + j)
-                if 0 <= nbr[0] < map_array.shape[0] and 0 <= nbr[1] < map_array.shape[1]:
-                    if map_array[nbr] != 0:
-                        nbs.append(nbr)
-    return nbs
-
-
-@numba.njit(fastmath=True)
-def neighbour_coords_generalised(coords, map_array, radius):
+def find_neighbours(coords, map_array, radius):
     nbs = []
     for i in range(-radius, radius + 1):
         for j in range(-radius, radius + 1):
@@ -52,18 +37,18 @@ def neighbour_coords_generalised(coords, map_array, radius):
 
 @numba.njit(fastmath=True)
 def euclidian_distance(p1, p2):
-    return np.sqrt((p1[0] - p2[0]) ** 2 + (p1[1] - p2[1]) ** 2)
+    return np.sqrt(np.add(np.square(np.subtract(p1[0], p2[0])), np.square(np.subtract(p1[1], p2[1]))))
 
 
 @numba.njit(fastmath=True)
-def diagonal_distance(p1, p2):
-    dx = abs(p1[1] - p2[1])
-    dy = abs(p1[0] - p2[0])
+def find_coord_in_array(array, item):
+    for i in range(len(array)):
+        if array[i][0] == item[0] and array[i][1] == item[1]:
+            return i
+    return -1
 
-    return (dx + dy) + (sqrt2 - 2) * min(dx, dy)
 
-
-def dijkstra(map_array, start, targets):
+def dijkstra(map_array, start, targets, radius=3):
     shape = map_array.shape
     g_values = np.full(shape, np.inf, dtype=np.float32)
     e_values = np.full(shape, np.inf, dtype=np.float32)
@@ -79,13 +64,13 @@ def dijkstra(map_array, start, targets):
     remaining_targets = [i for i in targets if i not in closed_set]
 
     while remaining_targets:
-        if len(closed_set) % 100000 == 0:
-            print(f'Explored {len(closed_set)} nodes')
+        # if len(closed_set) % 100000 == 0:
+        #     print(f'Explored {len(closed_set)} nodes')
 
         current = open_set.pop_item()
         closed_set.add(current)
         explored_history.append(current)
-        current_neighbours = neighbour_coords_generalised(current, map_array, 3)
+        current_neighbours = find_neighbours(current, map_array, radius)
 
         for neighbour in current_neighbours:
             if neighbour[0] not in closed_set:
@@ -110,18 +95,15 @@ def dijkstra(map_array, start, targets):
             current = prev[current]
         path.insert(0, start)
 
-        results.append((start, target, e_values[target], g_values[target], path))
+        results.append((start, target, e_values[target], g_values[target], np.array(path, dtype=np.uint16)))
 
-    print(f'All targets found in {time.time() - timer} s.')
-
-    return results, explored_history
+    return results, np.array(explored_history, dtype=np.uint16)
 
 
-def a_star(start, end, map_array):
+def a_star(start, end, map_array, radius):
     heuristic = euclidian_distance
     shape = map_array.shape
     g_values = np.full(shape, np.inf, dtype=np.float32)  # Array to store values for g(n)
-    # de_values = np.zeros(shape, dtype=np.float32)
     prev = np.full(shape, None)  # Array to store parent node
     closed_set = set([])  # List of explored nodes
     explored_history = []
@@ -133,7 +115,7 @@ def a_star(start, end, map_array):
         current = open_set.pop_item()
         closed_set.add(current)
         explored_history.append(current)
-        current_neighbours = neighbour_coords_generalised(current, map_array, 5)
+        current_neighbours = find_neighbours(current, map_array, radius)
 
         if current == end:
             break
@@ -148,7 +130,6 @@ def a_star(start, end, map_array):
                     g_values[neighbour[0]] = provisional_neighbour_g
                     prev[neighbour[0]] = current
                     open_set.add_item(neighbour[0], provisional_neighbour_g + neighbour_h)
-                    # de_values[neighbour[0]] = de_values[current] + (neighbour[1] * map_array[neighbour[0]])
 
     path = []
     current = end
@@ -158,243 +139,95 @@ def a_star(start, end, map_array):
         current = prev[current]
     path.insert(0, start)
 
-    return g_values[end], [path, ], explored_history
-
-
-def route_image(map_image, route):
-    for px in route:
-        map_image[px] = (255, 0, 255)
-
-    output_map = cv2.cvtColor(map_image, cv2.COLOR_BGR2RGB)
-    Image.fromarray(output_map).show()
+    return g_values[end], [np.array(path, dtype=np.uint16), ], np.array(explored_history, dtype=np.uint16)
 
 
 def show_routes(image, routes):
     for rte in routes:
         for idx, _ in enumerate(rte):
-            if rte[idx] != rte[-1]:
+            if tuple(rte[idx]) != tuple(rte[-1]):
+                pt1 = tuple([int(i) for i in reversed(rte[idx])])
+                pt2 = tuple([int(i) for i in reversed(rte[idx + 1])])
                 try:
-                    cv2.line(image, tuple(reversed(rte[idx])), tuple(reversed(rte[idx + 1])), (130, 0, 130), 3)
+                    cv2.line(image, pt1, pt2, (130, 0, 130), 3)
                 except IndexError:
                     pass
-    # image = image[:2160, :3840]
 
-    return (image[::2, ::2]).astype(np.uint8)
-
-
-def resize_frame(frame, ratio=0.436363637):
-    return cv2.resize(frame, None, fx=ratio, fy=ratio, interpolation=cv2.INTER_CUBIC)
+    return image.astype(np.uint8)
 
 
-def frame_from_array(frame):
-    return av.VideoFrame.from_ndarray(frame, format="bgr24")
+@numba.njit(parallel=True, fastmath=True)
+def render_frame_opt(map_img, history, frame_no, slice_size):
+    for i in numba.prange(slice_size):
+        idx = i + (slice_size * frame_no)
+        if idx < len(history):
+            coords = (history[i + (slice_size * frame_no)][0], history[i + (slice_size * frame_no)][1])
+            if map_img[coords][0] != 130 or map_img[coords][1] != 0 or map_img[coords][2] != 130:
+                map_img[coords] = (((map_img[coords] * 0.8) + np.array((51, 0, 51),
+                                                                       dtype=np.uint8)).astype(np.uint8))
+    return map_img
 
 
-@numba.njit(cache=False, parallel=True)
-def render_frame_conc(data, frame_no, slice_size, final_frame=False):  # map_image: np.array([[[]]]),
-    # global map_image
-    # global data
-    exp_history = data
-    frame = MAP_IMAGE.copy()
+def render_video_opt(map_img, history, routes, vid_length, vid_fps, output_path, post_roll=5, mem_file=None):
+    vid_no_frames = vid_length * vid_fps
+    slice_size = int(math.ceil(len(history) / vid_no_frames))
+    map_img = (map_img.copy()).astype(np.uint8)
 
-    if frame_no == 0:
-        return (frame[:2160:2, :3840:2]).astype(np.uint8)
-    old_points = exp_history[:slice_size * frame_no - 1]
-    new_points = exp_history[slice_size * frame_no - 1:slice_size * frame_no]
-
-    if len(old_points) > 0:
-        for pt in numba.prange(len(old_points)):
-            frame[(old_points[pt][0], old_points[pt][1])] = (((frame[(old_points[pt][0], old_points[pt][1])] * 0.8)
-                                                              + np.array((51, 0, 51), dtype=np.uint8))
-                                                             .astype(np.uint8))
-
-    if len(new_points) > 0:
-        for pt in numba.prange(len(new_points)):
-            frame[(new_points[pt][0], new_points[pt][1])] = np.array((255, 0, 255), dtype=np.uint8)
-
-    if final_frame:
-        return (frame[:2160, :3840]).astype(np.uint8)
+    if mem_file is None:
+        memory_file = io.BytesIO()
+        output = av.open(memory_file, 'w', format='mp4')
+        stream = output.add_stream('hevc', str(vid_fps))
+        stream.width = 1920
+        stream.height = 1080
+        stream.options = {'crf': '20'}
     else:
-        return (frame[:2160:2, :3840:2]).astype(np.uint8)
+        memory_file = mem_file
+        memory_file.seek(0)
+        output = av.open(memory_file, 'w', format='mp4')
+        if len(output.streams) == 0:
+            stream = output.add_stream('hevc', str(vid_fps))
+            stream.width = 1920
+            stream.height = 1080
+            stream.options = {'crf': '20'}
+        else:
+            print('Found a stream')
+            stream = output.streams.video[0]
 
-
-def build_frames(slice_size, frame_no):
-    global explored_history
-    history_list = []
-    live_list = []
-    final_frame_list = []
-    history = np.array(explored_history[:slice_size * frame_no])
-    if len(history) > 0:
-        history_list.append(history)
-    else:
-        history_list.append(np.array([[9999999, 9999999], [9999999, 9999999]]))
-    live_list.append(np.array(explored_history[slice_size * frame_no:slice_size * (frame_no + 1)]))
-    final_frame_list.append(False)
-
-    return [history_list, live_list, final_frame_list]
-
-
-def init_frame_worker(map_arg, data_arg):
-    global map_image_global
-    map_image_global = map_arg
-    global data
-    data = data_arg
-    # render_frame_conc.recompile()
-
-
-def render_video_conc(show_route, exp_history, vid_length, output_path):  # show_route: list of lists
-    vid_no_frames = vid_length * 60
-    slice_size = len(exp_history) // vid_no_frames
-    leftover_points = len(exp_history) % vid_no_frames
-    history_list = []
-    live_list = []
-    final_frame_list = []
-    timer = time.time()
-    exp_history = np.array(exp_history)
-
-    # for _ in range(120):
-    #     history_list.append(np.array([[9999999, 9999999], [9999999, 9999999]]))
-    #     live_list.append(np.array([[9999999, 9999999], [9999999, 9999999]]))
-    #     final_frame_list.append(False)
-
-    # for i in range(vid_no_frames - 1):
-    #     history = np.array(explored_history[:slice_size * i])
-    #     if len(history) > 0:
-    #         history_list.append(history)
-    #     else:
-    #         history_list.append(np.array([[9999999, 9999999], [9999999, 9999999]]))
-    #     live_list.append(np.array(explored_history[slice_size * i:slice_size * (i + 1)]))
-    #     final_frame_list.append(False)
-
-    frame_counter = [i for i in range(vid_no_frames + 3)]
-    # slice_size_list = [slice_size, ] * (vid_no_frames + 2)
-    final_frame_list = [False, ] * (vid_no_frames + 1) + [True]
-
-    # with concurrent.futures.ProcessPoolExecutor(12, initializer=init_frame_worker, initargs=(MAP_IMAGE, exp_history)) as executor:
-    #     results = [i for i in executor.map(build_frames, slice_size_list, frame_counter)]
-    #
-    # # history_list = history_list + [i[0] for i in results]
-    # # live_list = live_list + [i[1] for i in results]
-    # # final_frame_list = final_frame_list + [i[2] for i in results]
-    # #
-    # # if leftover_points > 0:
-    # #     history_list.append(np.array(exp_history[:leftover_points]))
-    # #     live_list.append(np.array(exp_history[-leftover_points:]))
-    # #     final_frame_list.append(False)
-    #
-    # history_list.append(np.array(exp_history))
-    # live_list.append(np.array([[9999999, 9999999], [9999999, 9999999]]))
-    # final_frame_list.append(True)
-    #
-    # time_split = time.time() - timer
-    # print(f'Frame pool built in {time_split} s.')
-    # time_split = time.time()
-    print('Rendering frames:')
-    with concurrent.futures.ProcessPoolExecutor(12, initializer=init_frame_worker,
-                                                initargs=(MAP_IMAGE, exp_history)) as executor:
-        frames = list(tqdm(executor.map(render_frame_conc, itertools.repeat(exp_history), frame_counter,
-                                        itertools.repeat(slice_size), final_frame_list), total=vid_no_frames + 2))
-
-    # frames = [i for i in frames]
-    final_frame = show_routes(frames[-1], show_route)
-    del frames[-1]
-
-    for i in range(300):
-        frames.append(final_frame)
-
-    for i in range(119):
-        frames.insert(0, frames[0])
-
-    time_split = time.time() - timer
-    print(f'Frames rendered in {time_split} s.')
-    time_split = time.time()
-
-    print('Rendering video:')
-
-    memory_file = io.BytesIO()
-
-    output = av.open(memory_file, 'w', format='mp4')
-    stream = output.add_stream('h264', '60')
-    stream.width = 1920
-    stream.height = 1080
-    stream.options = {'crf': '20'}
-
-    for frame in tqdm(frames):
-        video_frame = av.VideoFrame.from_ndarray(frame, format="bgr24")
+    for _ in range(vid_fps * 2):
+        video_frame = av.VideoFrame.from_ndarray(map_img[::2, ::2], format="bgr24")
         packet = stream.encode(video_frame)
         output.mux(packet)
 
-    packet = stream.encode(None)
-    output.mux(packet)
-    output.close()
+    timer_render = time.time()
+    print('Rendering frames...')
+    time.sleep(0.01)
+    for i in tqdm(range(vid_no_frames)):
+        map_img = render_frame_opt(map_img, history, i, slice_size)
+        video_frame = av.VideoFrame.from_ndarray(map_img[::2, ::2], format="bgr24")
+        packet = stream.encode(video_frame)
+        output.mux(packet)
+    print(f'{vid_no_frames} frames rendered in {time.time() - timer_render:2f} seconds.')
 
-    with open(output_path, 'wb') as f:
-        f.write(memory_file.getbuffer())
+    map_img = show_routes(map_img, routes)
 
-    time_split = time.time() - time_split
-    print(f'Video saved in {time_split} s.')
+    for _ in range((vid_fps * post_roll) + 1):
+        video_frame = av.VideoFrame.from_ndarray(map_img[::2, ::2], format="bgr24")
+        packet = stream.encode(video_frame)
+        output.mux(packet)
 
+    timer_save_video = time.time()
+    if mem_file is None:
+        packet = stream.encode(None)
+        output.mux(packet)
+        output.close()
 
-def render_video(map_image, route, explored_history, vid_length):
-    shape = map_image.shape
-    d_shape = map_image.shape[:2]
-    colour_full = np.full(shape, (255, 0, 255), dtype=np.uint8)
-    old_alpha = np.zeros(d_shape, dtype=np.single)
-    front_alpha = np.zeros(d_shape, dtype=np.single)
+    if output_path:
+        print('Saving video...')
+        with open(output_path, 'wb') as f:
+            f.write(memory_file.getbuffer())
+        print(f'Video {output_path} saved in {time.time() - timer_save_video:.2f} seconds.')
 
-    vid_no_frames = vid_length * 60
-    leftover_points = len(explored_history) % vid_no_frames
-    slice_size = int((len(explored_history) - leftover_points) / vid_no_frames)
-    remainder_history = explored_history
-
-    pre_frame = cv2.resize(map_image, None, fx=0.436363637, fy=0.436363637, interpolation=cv2.INTER_CUBIC)
-    video = cv2.VideoWriter('{}_{}.avi'.format(route[0], route[-1]), cv2.VideoWriter_fourcc(*'MJPG'),
-                            60, (pre_frame.shape[1], pre_frame.shape[0]))
-
-    for _ in range(120):
-        video.write(pre_frame.astype(np.uint8))
-
-    control = True
-    while control:
-
-        if len(remainder_history) > slice_size:
-            current_slice = remainder_history[:slice_size]
-            remainder_history = remainder_history[slice_size:]
-        elif remainder_history:
-            current_slice = remainder_history
-            remainder_history = []
-        else:
-            current_slice = []
-            control = False
-
-        for coord in current_slice:
-            front_alpha[coord] = 1
-
-        current_alpha = old_alpha + front_alpha
-        current_mask = np.dstack((current_alpha, current_alpha, current_alpha))
-
-        current_frame = (map_image * (1 - current_mask) + colour_full * current_mask).astype(np.uint8)
-        current_frame_resized = cv2.resize(current_frame,
-                                           None, fx=0.436363637, fy=0.436363637, interpolation=cv2.INTER_CUBIC)
-        video.write(current_frame_resized)
-        # print('{} frames of {} processed'.format(len(explored_history)-len(remainder_history), len(explored_history)))
-
-        front_alpha = front_alpha * 0.3
-        old_alpha = old_alpha + front_alpha
-        front_alpha = np.zeros(d_shape, dtype=np.single)
-
-    for _ in range(30):
-        video.write(current_frame_resized)
-
-    for i in route:
-        cv2.circle(current_frame, (i[1], i[0]), 3, (130, 0, 130), 2)
-        current_frame_resized = cv2.resize(current_frame, None, fx=0.436363637, fy=0.436363637,
-                                           interpolation=cv2.INTER_CUBIC)
-
-    for _ in range(120):
-        video.write(current_frame_resized)
-
-    video.release()
+    return map_img, memory_file  # .getbuffer()
 
 
 class PQ:
@@ -427,8 +260,8 @@ class PQ:
 
 class PathFinder:
     def __init__(self, map_path, map_image_path, start_coords, end_coords, targets):
-        self.map_array = np.array(Image.open(map_path))
-        self.map_image = cv2.imread(map_image_path)
+        self.map_array = np.array(Image.open(map_path))[:2160, :3840]
+        self.map_image = cv2.imread(map_image_path)[:2160, :3840]
         self.start = start_coords
         self.end = end_coords
         self.targets = self.generate_targets(targets)
@@ -436,13 +269,23 @@ class PathFinder:
         self.all_nodes = set([self.start, self.end] + [x for xs in self.targets for x in xs])
         self.graph = self.generate_graph()
         self.pixel_nm = 2672.246 / euclidian_distance(self.start, self.end)
+        self.pixel_km = 4949 / euclidian_distance(self.start, self.end)
         self.energy_divisor = 150 / (4949 / euclidian_distance(self.start, self.end))
+        self.histories = {i: None for i in self.graph.keys()}
+
+    def pop_and_pik(self):
+        if self.empty_dicts('distance') > 0:
+            self.find_distances()
+        if self.empty_dicts('energy') > 0:
+            self.find_energies()
+        with open(f'{self.start}_{self.end}.pkl', 'wb') as f:
+            pickle.dump(self, f)
 
     def empty_dicts(self, field='distance'):
         count = 0
         for k in self.graph.keys():
             for j in self.graph[k].keys():
-                if self.graph[k][j][field] == np.inf:
+                if self.graph[k][j][field] == np.inf or self.graph[k][j][field] is None:
                     count += 1
         return count
 
@@ -476,11 +319,50 @@ class PathFinder:
                         graph[i][j] = {
                             'distance': np.inf,
                             'd_path': None,
+                            'd_history': None,
                             'energy': np.inf,
-                            'e_path': None
+                            'avg_energy': np.inf,
+                            'e_path': None,
+                            'e_history': None
                         }
 
         return graph
+
+    def find_energies(self):
+        starts_targets = {i: set([j for j in self.graph[i].keys()]) for i in self.graph.keys()}
+
+        for k in starts_targets.keys():
+            for t in starts_targets[k]:
+                if k in starts_targets[t]:
+                    starts_targets[t].remove(k)
+
+        starts_targets = {k: v for k, v in starts_targets.items() if len(v) != 0}
+        starts = [i for i in starts_targets.keys()]
+        targets = [starts_targets[k] for k in starts]
+
+        print('Finding energies...')
+        time.sleep(0.01)
+        with concurrent.futures.ProcessPoolExecutor() as executor:
+            mp = itertools.repeat(self.map_array)
+            rx = itertools.repeat(5)
+            for results, history in list(tqdm(executor.map(dijkstra, mp, starts, targets, rx),
+                                              total=len(starts))):
+                history_loc = results[0][0]
+                self.histories[history_loc] = history
+
+                for result in results:
+                    start = result[0]
+                    end = result[1]
+                    self.graph[start][end]['energy'] = result[2] / self.energy_divisor
+                    self.graph[start][end]['avg_energy'] = result[2] / result[3]
+                    self.graph[start][end]['e_path'] = result[4]
+                    self.graph[start][end]['e_history'] = history_loc
+                    self.graph[end][start]['energy'] = self.graph[start][end]['energy']
+                    self.graph[end][start]['avg_energy'] = self.graph[start][end]['avg_energy']
+                    self.graph[end][start]['e_path'] = list(reversed(self.graph[start][end]['e_path']))
+                    self.graph[end][start]['e_history'] = history_loc
+
+        self.histories = {k: v for k, v in self.histories.items() if v is not None}
 
     def find_distances(self):
         pairs = set([])
@@ -490,14 +372,22 @@ class PathFinder:
                     pairs.add((start, end))
 
         starts, ends = list(zip(*pairs))
+
+        print('Finding distances...')
+        time.sleep(0.01)
         with concurrent.futures.ProcessPoolExecutor() as executor:
-            for result in executor.map(a_star, starts, ends, itertools.repeat(self.map_array)):
-                start = result[1][0]
-                end = result[1][-1]
+            mp = itertools.repeat(self.map_array)
+            rx = itertools.repeat(5)
+            for result in list(tqdm(executor.map(a_star, starts, ends, mp, rx),
+                               total=len(starts))):
+                start = tuple(result[1][0][0])
+                end = tuple(result[1][0][-1])
                 self.graph[start][end]['distance'] = result[0] * self.pixel_nm
                 self.graph[start][end]['d_path'] = result[1]
+                self.graph[start][end]['d_history'] = result[2]
                 self.graph[end][start]['distance'] = self.graph[start][end]['distance']
                 self.graph[end][start]['d_path'] = list(reversed(self.graph[start][end]['d_path']))
+                self.graph[end][start]['d_history'] = self.graph[start][end]['d_history']
 
     def generate_target_permutations(self, target_set=None):
 
@@ -520,8 +410,11 @@ class PathFinder:
 
     def find_mst(self, parameter='distance'):
 
-        if self.empty_dicts() > 0:
-            self.find_distances()
+        if self.empty_dicts(parameter) > 0:
+            if parameter == 'distance':
+                self.find_distances()
+            elif parameter == 'energy':
+                self.find_energies()
 
         lowest_score = np.inf
         lowest_scoring_path = None
@@ -546,132 +439,126 @@ class PathFinder:
         route = []
         for idx in range(len(path) - 1):
             route.append(self.graph[path[idx]][path[idx + 1]][parameter])
+            # print(self.graph[path[idx]][path[idx + 1]]['avg_energy'] * self.energy_divisor)
 
         for bound in route:
             for idx in range(len(bound) - 1):
-                cv2.line(frame, tuple(reversed(bound[idx])), tuple(reversed(bound[idx + 1])), (130, 0, 130), 3)
+                cv2.line(frame, tuple(reversed(bound[idx])), tuple(reversed(bound[idx + 1])), (130, 0, 130), 2)
 
         output_map = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         Image.fromarray(output_map).show()
 
+    def video_route(self, route_type, vid_fps=30):
+        score, route = self.find_mst(route_type)
+        map_img = self.map_image.copy()
+
+        memory_file = io.BytesIO()
+        output = av.open(memory_file, 'w', format='mp4')
+        # out_stream = output.streams.video[0]
+        stream = output.add_stream('hevc', vid_fps)
+        stream.width = 1920
+        stream.height = 1080
+        stream.options = {'crf': '20'}
+
+        for _ in range(vid_fps * 2):
+            video_frame = av.VideoFrame.from_ndarray(map_img[::2, ::2], format="bgr24")
+            packet = stream.encode(video_frame)
+            output.mux(packet)
+
+        if route_type == 'distance':
+            tot_vid_no_frames = 60 * vid_fps
+            tot_hist = sum([len(self.graph[route[i]][route[i + 1]]['d_history']) for i in range(len(route) - 1)])
+
+            for idx, pt in enumerate(route):
+                if pt != route[-1]:
+                    hist = self.graph[pt][route[idx + 1]]['d_history']
+                    rtes = self.graph[pt][route[idx + 1]]['d_path']
+                    vid_no_frames = min(max(int(math.ceil(tot_vid_no_frames * (len(hist)/tot_hist))),
+                                            (2 * vid_fps)),
+                                        20 * vid_fps)
+                    slice_size = int(math.ceil(len(hist) / vid_no_frames))
+
+                    for i in tqdm(range(vid_no_frames)):
+                        map_img = render_frame_opt(map_img, hist, i, slice_size)
+                        video_frame = av.VideoFrame.from_ndarray(map_img[::2, ::2], format="bgr24")
+                        packet = stream.encode(video_frame)
+                        output.mux(packet)
+
+                    map_img = show_routes(map_img, rtes)
+
+                    if route[idx + 1] == route[-1]:
+                        p_r = 5
+                    else:
+                        p_r = 0
+
+                    for _ in range((vid_fps * p_r) + 1):
+                        video_frame = av.VideoFrame.from_ndarray(map_img[::2, ::2], format="bgr24")
+                        packet = stream.encode(video_frame)
+                        output.mux(packet)
+
+        elif route_type == 'energy':
+            tot_vid_no_frames = 60 * 30
+            tot_hist = 0
+
+            for idx, pt in enumerate(route):
+                if pt != route[-1]:
+                    hist_loc = self.graph[pt][route[idx + 1]]['e_history']
+                    hist = self.histories[hist_loc]
+                    hist_stop = max(find_coord_in_array(hist, pt), find_coord_in_array(hist, route[idx + 1]))
+                    tot_hist += len(hist[:hist_stop])
+
+            for idx, pt in enumerate(route):
+                if pt != route[-1]:
+                    hist_loc = self.graph[pt][route[idx + 1]]['e_history']
+                    hist = self.histories[hist_loc]
+                    hist_stop = max(find_coord_in_array(hist, pt), find_coord_in_array(hist, route[idx + 1]))
+                    rtes = self.graph[pt][route[idx + 1]]['e_path']
+                    vid_no_frames = min(max(int(math.ceil(tot_vid_no_frames * (len(hist[:hist_stop]) / tot_hist))),
+                                            (2 * vid_fps)),
+                                        40 * vid_fps)
+                    slice_size = int(math.ceil(len(hist[:hist_stop]) / vid_no_frames))
+
+                    for i in tqdm(range(vid_no_frames)):
+                        map_img = render_frame_opt(map_img, hist[:hist_stop], i, slice_size)
+                        video_frame = av.VideoFrame.from_ndarray(map_img[::2, ::2], format="bgr24")
+                        packet = stream.encode(video_frame)
+                        output.mux(packet)
+
+                    map_img = show_routes(map_img, [rtes, ])
+
+                    if route[idx + 1] == route[-1]:
+                        p_r = 5
+                    else:
+                        p_r = 0
+
+                    for _ in range((vid_fps * p_r) + 1):
+                        video_frame = av.VideoFrame.from_ndarray(map_img[::2, ::2], format="bgr24")
+                        packet = stream.encode(video_frame)
+                        output.mux(packet)
+
+        else:
+            raise ValueError('Invalid route type. Must be "distance" or "energy".')
+
+        packet = stream.encode(None)
+        output.mux(packet)
+        output.close()
+
+        with open(f'{self.start}_{self.end}_{route_type}.mp4', 'wb') as f:
+            f.write(memory_file.getbuffer())
+
+        memory_file.close()
+
 
 if __name__ == '__main__':
 
-    # pathfinder = PathFinder("map_energy_quantised.bmp", "map_all.png",
-    #                         START, END, [TGT_A, TGT_B, TGT_C])
-    #
-    # print(pathfinder.pixel_nm)
-    # print(pathfinder.energy_divisor)
-    #
-    # length, steps = pathfinder.find_mst()
-    #
-    # # print(f'Path Length is {length} nm')
-    # # pathfinder.display_route(steps)
-    #
-    # with open('pathfinder.pkl.bak', 'wb') as file:
-    #     pickle.dump(pathfinder, file)
-
     try:
-        with open('pathfinder.pkl.bak', 'rb') as file:
+        with open(f'{START}_{END}.pkl', 'rb') as file:
             pathfinder = pickle.load(file)
     except FileNotFoundError:
-        pathfinder = PathFinder("map_energy_quantised.bmp", "map_all.png",
+        pathfinder = PathFinder("map_energy_quantised_fixed.bmp", "map_all.png",
                                 START, END, [TGT_A, TGT_B, TGT_C])
 
-    # print(pathfinder.pixel_nm)
+        pathfinder.pop_and_pik()
 
-    t_list = [i for i in pathfinder.graph[START].keys()]
-
-    res, exp = dijkstra(pathfinder.map_array, START, t_list)
-
-    # res, exp = dijkstra(pathfinder.map_array, START, [(750, 750)])
-    # render_video_conc(pathfinder.map_image, [r[-1] for r in res], exp, 60)
-
-    # render_frame.recompile()
-    render_video_conc([r[-1] for r in res], exp, 180, 'output1.mp4')
-
-    # print(START, [k for k in pathfinder.graph[START].keys()][0])
-    # print(pathfinder.graph[START][[k for k in pathfinder.graph[START].keys()][0]]['d_path'])
-    #
-    # print(pathfinder.targets)
-
-    # pathfinder.find_distances()
-    #
-    # for start in pathfinder.graph.keys():
-    #     for end in pathfinder.graph[start].keys():
-    #         if not pathfinder.graph[start][end]['distance']:
-    #             print(start, end)
-
-    # for i in neighbour_coords_generalised((3, 3), pathfinder.map_array, 3):
-    #     print(i[1])
-    #
-    # print(len(neighbour_coords_generalised((3, 3), pathfinder.map_array, 3)))
-
-    # x = [1, 2, 3, 4, 5]
-    # print(x[:len(x)])
-
-    # x = np.full((2, 2, 3), 100, dtype=np.single)
-    # y = np.full((2, 2), 0, dtype=np.single)
-    #
-    # print(x*y)
-
-    # distance, route, explored = a_star(START, END, pathfinder.map_array)
-    #
-    # print(distance)
-    # print(len(route))
-    # print(len(explored))
-    #
-    # render_video_conc(pathfinder.map_image, route, explored, 30)
-
-    # print(distance)
-    # print(4949/euclidian_distance(START, END))
-    # print(distance * (4949/euclidian_distance(START, END)))
-    #
-    # print(len(explored))
-
-    # route_image(pathfinder.map_image, path)
-    # print(len(pathfinder.graph[list(pathfinder.graph.keys())[2]]))
-
-    # print(pathfinder.graph)
-
-    # print(len(list(chain.from_iterable([list(pathfinder.graph[i].keys()) for i in pathfinder.graph.keys()]))))
-    # print(list(chain.from_iterable([list(pathfinder.graph[i].keys()) for i in pathfinder.graph.keys()])))
-    # print(((24*18))+48)
-    # print(len(pathfinder.graph.keys()))
-    # for i in pathfinder.graph.keys():
-    #     print(len(pathfinder.graph[i]))
-    # print(pathfinder.graph[START][list(pathfinder.all_nodes)[3]])
-
-    # for key in pathfinder.graph.keys():
-    #     print(neighbour_coords(key, pathfinder.map))
-
-    # print(euclidian_distance(START, END))
-
-    # print([key for key in pathfinder.graph[START].keys()])
-    # pathfinder.show_map()
-
-    # offsets = tuple(map(lambda x, y: x - y, START, END))
-    # distance_pixels = np.sqrt((offsets[0]**2) + (offsets[1]**2))
-    # print(distance_pixels)
-    # np_img = np.array(Image.open("map_energy_quantised.bmp"))
-    #
-    # unique, counts = np.unique(np_img, return_counts=True)
-    # print(dict(zip(unique, counts)))
-    #
-    # print(neighbour_coords((2226, 4399), np_img))
-    #
-    # np_img[START] = 255
-    # np_img[TGT_A] = 255
-    # np_img[TGT_B] = 255
-    # np_img[TGT_C] = 255
-    # np_img[END] = 255
-    #
-    # coords_dict = {}
-
-    # for i in range(0, np_img.shape[0]):
-    #     for j in range(0, np_img.shape[1]):
-    #         coords_dict[(i, j)] = None
-
-    # print(coords_dict)
-
-    # TODO Use arrays for all factors, g cost, e cost, node from coords tuple for distance and energy,
+    # pathfinder.video_route('energy')
+    print(85 * pathfinder.pixel_km)
