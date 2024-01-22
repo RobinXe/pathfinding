@@ -18,7 +18,6 @@ END = (1435, 2469)
 TGT_A = (791, 1441)
 TGT_B = (982, 1551)
 TGT_C = (1410, 2181)
-SQRT2 = np.sqrt(2)  # Used a lot; precompute to reduce load
 
 
 @numba.njit(fastmath=True)
